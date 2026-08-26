@@ -2,7 +2,16 @@ import { z } from "zod";
 import type { CoreEngineClient } from "../client/types.js";
 import type { Capability } from "../config/capabilities.js";
 import { DOCUMENT_TYPE_KEYS, type DocumentTypeKey } from "../config/document-types.js";
-import { completeCredential, completeMintEbl, keyPairSchema, prepareCredential, prepareMintEbl, type DryRunResult } from "./write.js";
+import {
+  completeCredential,
+  completeMintEbl,
+  keyPairSchema,
+  prepareCredential,
+  prepareMintEbl,
+  qrCodeSchema,
+  renderMethodSchema,
+  type DryRunResult,
+} from "./write.js";
 
 export type WorkflowCapabilities = Partial<Record<Capability, boolean>>;
 
@@ -55,8 +64,8 @@ export const mintEblInputSchema = z.object({
   chain: z.string().optional(),
   context: z.array(z.string()).optional(),
   documentType: z.enum(DOCUMENT_TYPE_KEYS as [DocumentTypeKey, ...DocumentTypeKey[]]).optional(),
-  renderMethod: z.object({ id: z.string(), type: z.string(), templateName: z.string() }).optional(),
-  qrCode: z.object({ uri: z.string(), type: z.string() }).optional(),
+  renderMethod: renderMethodSchema.optional(),
+  qrCode: qrCodeSchema.optional(),
   expirationDate: z.string().optional(),
   beneficiary: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
   holder: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
@@ -69,11 +78,12 @@ export type MintEblInput = z.infer<typeof mintEblInputSchema>;
 export async function mintEbl(
   client: CoreEngineClient,
   input: MintEblInput,
-  capabilities?: WorkflowCapabilities
+  capabilities?: WorkflowCapabilities,
+  rendererBaseUrl?: string
 ): Promise<Record<string, unknown> | UnsignedMintResult | DryRunResult> {
   const { beneficiary, holder, from, keyPair, dryRun, ...prepareFields } = mintEblInputSchema.parse(input);
 
-  const prepared = await prepareMintEbl(client, { ...prepareFields, dryRun });
+  const prepared = await prepareMintEbl(client, { ...prepareFields, dryRun }, undefined, rendererBaseUrl);
   if ("dryRun" in prepared) {
     return prepared;
   }
@@ -100,8 +110,8 @@ export const issueDocumentInputSchema = z.object({
   documentType: z.enum(DOCUMENT_TYPE_KEYS as [DocumentTypeKey, ...DocumentTypeKey[]]).optional(),
   validFrom: z.string().optional(),
   statusPurpose: z.enum(["revocation", "suspension"]).optional(),
-  renderMethod: z.object({ id: z.string(), type: z.string(), templateName: z.string() }).optional(),
-  qrCode: z.object({ uri: z.string(), type: z.string() }).optional(),
+  renderMethod: renderMethodSchema.optional(),
+  qrCode: qrCodeSchema.optional(),
   expirationDate: z.string().optional(),
   keyPair: keyPairSchema.optional(),
   dryRun: z.boolean().optional(),
@@ -111,11 +121,12 @@ export type IssueDocumentInput = z.infer<typeof issueDocumentInputSchema>;
 export async function issueDocument(
   client: CoreEngineClient,
   input: IssueDocumentInput,
-  capabilities?: WorkflowCapabilities
+  capabilities?: WorkflowCapabilities,
+  rendererBaseUrl?: string
 ): Promise<Record<string, unknown> | UnsignedMintResult | DryRunResult> {
   const { keyPair, dryRun, ...prepareFields } = issueDocumentInputSchema.parse(input);
 
-  const prepared = await prepareCredential(client, { ...prepareFields, dryRun });
+  const prepared = await prepareCredential(client, { ...prepareFields, dryRun }, undefined, rendererBaseUrl);
   if ("dryRun" in prepared) {
     return prepared;
   }

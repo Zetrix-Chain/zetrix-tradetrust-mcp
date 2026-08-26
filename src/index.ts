@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadProfile } from "./config/profile.js";

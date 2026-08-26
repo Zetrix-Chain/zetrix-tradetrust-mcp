@@ -55,3 +55,31 @@ export class RateLimitError extends CoreEngineError {
     this.retryAfterMs = options?.retryAfterMs;
   }
 }
+
+export class ContextValidationError extends CoreEngineError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, 422, options);
+    this.name = "ContextValidationError";
+  }
+}
+
+export class IssuerDidValidationError extends CoreEngineError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, 422, options);
+    this.name = "IssuerDidValidationError";
+  }
+}
+
+export class KeyIdValidationError extends CoreEngineError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, 422, options);
+    this.name = "KeyIdValidationError";
+  }
+}
+
+export class RenderMethodValidationError extends CoreEngineError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, 422, options);
+    this.name = "RenderMethodValidationError";
+  }
+}

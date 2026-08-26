@@ -5,6 +5,11 @@ export const CORE_ENGINE_BASE_URLS = {
   "z2-mainnet": "https://api-tradetrust.zetrix.com/api/z2-core-engine",
 } as const;
 
+export const RENDERER_URLS = {
+  "z2-testnet": "https://renderer-tradetrust-sandbox.zetrix.com",
+  "z2-mainnet": "https://renderer-tradetrust.zetrix.com",
+} as const;
+
 export interface Profile {
   baseUrl: string;
   /** true when baseUrl came from the z2-testnet default (no Z2TT_BASE_URL/Z2TT_ENV set) rather
@@ -73,4 +78,15 @@ export function loadProfile(deps: LoadProfileDeps): Profile {
     allowSecretPrompt,
     capabilities: undefined,
   };
+}
+
+/**
+ * The default renderMethod.id for this deployment, resolved the same way baseUrl itself is
+ * resolved -- by which known network it matches, not by asking anything new of the caller.
+ * Returns undefined for a custom/unrecognized baseUrl (e.g. a local dev core-engine, or an
+ * explicit Z2TT_BASE_URL pointing elsewhere) -- there's no confident default to guess there.
+ */
+export function resolveRendererUrl(baseUrl: string): string | undefined {
+  const entry = Object.entries(CORE_ENGINE_BASE_URLS).find(([, url]) => url === baseUrl);
+  return entry ? RENDERER_URLS[entry[0] as keyof typeof RENDERER_URLS] : undefined;
 }

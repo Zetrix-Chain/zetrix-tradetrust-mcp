@@ -1,4 +1,9 @@
-import { DOCUMENT_TYPES, DOCUMENT_TYPE_KEYS, type DocumentTypeKey } from "../config/document-types.js";
+import {
+  DOCUMENT_TYPES,
+  DOCUMENT_TYPE_KEYS,
+  type DocumentTypeKey,
+  type RenderTemplateName,
+} from "../config/document-types.js";
 
 export interface DocumentTypeListEntry {
   key: DocumentTypeKey;
@@ -6,6 +11,7 @@ export interface DocumentTypeListEntry {
   credentialSubjectType?: string;
   contextUrls: readonly string[];
   verified: boolean;
+  templateName?: RenderTemplateName;
 }
 
 /**

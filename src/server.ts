@@ -6,6 +6,7 @@ import type { Capability } from "./config/capabilities.js";
 import { createCoreEngineClient } from "./client/core-engine.js";
 import { createElicitingSecretProvider } from "./secret-elicitation.js";
 import type { Profile } from "./config/profile.js";
+import { resolveRendererUrl } from "./config/profile.js";
 import { registeredToolNames, filterForCredentials } from "./tools/registry.js";
 import { healthCheck } from "./tools/utility.js";
 import { listDocumentTypes } from "./tools/document-types.js";
@@ -64,12 +65,20 @@ import { issueDocument, mintEbl, issueDocumentInputSchema, mintEblInputSchema } 
 import { createIssuerKey, createIssuerKeyInputSchema } from "./tools/keys.js";
 import { signRelayRequest, signRelayRequestInputSchema } from "./tools/relay-signing.js";
 
+const SAFE_MODE_VALIDATION_ERROR_HINT =
+  " -- likely cause: a context/property mismatch (context[0] must match the VC version of any " +
+  "date property used) or a credentialSubject field not defined by an allowlisted context. Call " +
+  "list_document_types and recheck context[0].";
+
 export function formatError(err: unknown): { type: string; message: string; capability?: string } {
   if (err instanceof ServiceDisabledError) {
     return { type: err.name, message: err.message, capability: err.capability };
   }
   if (err instanceof CoreEngineError) {
-    return { type: err.name, message: err.message };
+    const message = /safe mode validation error/i.test(err.message)
+      ? `${err.message}${SAFE_MODE_VALIDATION_ERROR_HINT}`
+      : err.message;
+    return { type: err.name, message };
   }
   if (err instanceof ZodError) {
     return { type: "ValidationError", message: err.message };
@@ -89,7 +98,8 @@ export function buildToolDescriptors(
   client: CoreEngineClient,
   capabilities: Partial<Record<Capability, boolean>> | undefined,
   allowWrites: boolean,
-  hasCredentials: boolean = true
+  hasCredentials: boolean = true,
+  rendererBaseUrl?: string
 ): Record<string, ToolDescriptor> {
   const all: Record<string, ToolDescriptor> = {
     health_check: {
@@ -99,9 +109,14 @@ export function buildToolDescriptors(
     },
     list_document_types: {
       description:
-        "Lists known document types with their required JSON-LD context URL(s) and whether the " +
-        "shape is proven against core-engine. Call this before prepare_credential/prepare_mint_ebl " +
-        "and pass the key as documentType to auto-fill the correct context.",
+        "Lists known document types with their required TrustVC extension context URL(s) (not the " +
+        "base VC context) and whether the shape is proven against core-engine. Call this before " +
+        "prepare_credential/prepare_mint_ebl and pass the key as documentType to auto-fill the " +
+        "extension context. prepare_credential defaults context[0] to " +
+        "https://www.w3.org/ns/credentials/v2 when you omit it entirely, matching core-engine's " +
+        "own default -- supply it yourself only to override, and never as the v1.1 base context " +
+        "(rejected there, see prepare_credential); prepare_mint_ebl adds its own base context " +
+        "automatically too, so it never needs one from you either.",
       schema: EMPTY_SCHEMA,
       handler: () => Promise.resolve(listDocumentTypes()),
     },
@@ -141,30 +156,75 @@ export function buildToolDescriptors(
       handler: (args) => getFinality(client, args as never, capabilities),
     },
     prepare_credential: {
-      description: "Builds an unsigned VC + the signing spec the caller's signer needs.",
+      description:
+        "Builds an unsigned VC + the signing spec the caller's signer needs -- first step of " +
+        "prepare -> sign? -> complete (see issue_document for the combined flow). If context[0] " +
+        "is missing or unrecognized, it defaults to https://www.w3.org/ns/credentials/v2 (pairs " +
+        "with validFrom) -- matching core-engine's own default, so omitting context entirely, or " +
+        "using documentType alone, both still work. The one context[0] value actually rejected is " +
+        "the v1.1 base context (https://www.w3.org/2018/credentials/v1, pairs with issuanceDate): " +
+        "core-engine currently emits validFrom regardless of context version, so a v1.1 credential " +
+        "built here can never be signed -- that's the only case worth failing before it reaches " +
+        "core-engine. Use documentType (see list_document_types) to auto-fill the TrustVC " +
+        "extension context for credentialSubject fields. " +
+        "renderMethod, if used, is a single object {id, type, templateName} here -- core-engine " +
+        "wraps it into a one-element array in the signed document itself (matching TrustVC's own " +
+        "DocumentBuilder convention), so sending an array as input is rejected; qrCode stays a " +
+        "plain object in both places. Never supply a top-level id -- it's signer-generated and " +
+        "rejected if you do; it appears in the final signed VC without your involvement. " +
+        "render-method-context-v2.json / qrcode-context.json are added to context automatically " +
+        "by core-engine when renderMethod/qrCode are present -- no need to add them yourself. " +
+        "renderMethod's fields each have defaults: supplying any part of it (even {}) means you " +
+        "want rendering -- id defaults to this deployment's renderer URL, type defaults to " +
+        "EMBEDDED_RENDERER, and templateName defaults to whatever documentType implies; if " +
+        "documentType is omitted or has no known templateName mapping, templateName must be " +
+        "supplied explicitly -- core-engine's allowlist has no content-agnostic default. Supply " +
+        "any field explicitly to override just that one.",
       schema: prepareCredentialInputSchema,
-      handler: (args) => prepareCredential(client, args as never, capabilities),
+      handler: (args) => prepareCredential(client, args as never, capabilities, rendererBaseUrl),
     },
     sign_credential: {
-      description: "core-engine signs on the issuer's behalf, given the raw key. Opt-in, off by default.",
+      description:
+        "core-engine signs on the issuer's behalf, given the raw key. Opt-in, off by default. A " +
+        "'Safe mode validation error' here means the unsigned VC's context and properties " +
+        "disagree, or a credentialSubject field isn't defined by an allowlisted context -- not a " +
+        "problem with the signing key. Call list_document_types and recheck the context " +
+        "prepare_credential was given.",
       schema: signCredentialInputSchema,
       handler: (args) => signCredential(client, args as never, capabilities),
     },
     complete_credential: {
-      description: "Verifies the signed VC and finalizes it against the earlier prepare call.",
+      description:
+        "Verifies the signed VC and finalizes it against the earlier prepare call. Rejects if the " +
+        "signing key's controller doesn't match the earlier signingSpec.expectedIssuerDid, or if " +
+        "mandatoryPointers were reconstructed instead of taken from signingSpec verbatim (that " +
+        "silently drops decorations like renderMethod/qrCode/expirationDate from the signed proof).",
       schema: completeCredentialInputSchema,
       handler: (args) => completeCredential(client, args as never, capabilities),
     },
     issue_document: {
-      description: "Intent-driven front door for Pillar 1: prepare -> sign? -> complete.",
+      description:
+        "Intent-driven front door for Pillar 1: prepare_credential -> sign_credential? -> " +
+        "complete_credential, calling prepare_credential internally (so its base-context and " +
+        "renderMethod-defaulting behavior both apply here too -- see prepare_credential). " +
+        "Omitting keyPair returns the unsigned VC plus a note to sign externally, then call " +
+        "complete_credential with the same preparationId.",
       schema: issueDocumentInputSchema,
-      handler: (args) => issueDocument(client, args as never, capabilities),
+      handler: (args) => issueDocument(client, args as never, capabilities, rendererBaseUrl),
     },
     create_issuer_key: {
       description:
         "Generates a fresh signing key locally -- no core-engine call, never persisted BY THIS SERVER. " +
-        "The returned secretKeyMultibase / privateKey is still the tool's result, so it lands in the " +
-        "calling MCP host's transcript same as any other output -- store it yourself if you need it again.",
+        "For kind: \"vc\", omit issuerDid to get a correctly self-resolving did:key identity derived " +
+        "from the generated key itself -- this is the identity that will actually pass signature " +
+        "verification later. Passing a did:key string as issuerDid is rejected: a did:key identity " +
+        "is self-derived from its own public key, so a freshly generated key pair can never resolve " +
+        "under someone else's did:key. Supply issuerDid only for a caller-owned did:web. keyId, if " +
+        "supplied, must name a verification method on the same controller (issuerDid, or the " +
+        "auto-derived did:key when issuerDid is omitted) -- a keyId naming a different DID is " +
+        "rejected for the same reason. The returned secretKeyMultibase / privateKey is still the " +
+        "tool's result, so it lands in the calling MCP host's transcript same as any other output " +
+        "-- store it yourself if you need it again.",
       schema: createIssuerKeyInputSchema,
       handler: (args) => createIssuerKey(args as never, capabilities),
     },
@@ -174,19 +234,37 @@ export function buildToolDescriptors(
       handler: (args) => mutateStatus(client, args as never, capabilities),
     },
     prepare_mint_ebl: {
-      description: "Builds the unsigned mint VC for a transferable record.",
+      description:
+        "Builds the unsigned mint VC for a transferable record. Unlike prepare_credential, " +
+        "core-engine prepends the base VC context automatically here -- context/documentType are " +
+        "only for the TrustVC extension URL(s) (see list_document_types); don't add a base context " +
+        "yourself, even if you're used to supplying it for prepare_credential -- doing so produces " +
+        "a harmless but wrong duplicated context entry in the signed output. renderMethod, if " +
+        "used, is a single object {id, type, templateName} here too -- core-engine wraps it into a " +
+        "one-element array in the signed document itself, so sending an array as input is " +
+        "rejected. Never supply a top-level id -- it's signer-generated and rejected if you do. " +
+        "renderMethod's fields have the same defaults as prepare_credential's -- see there for " +
+        "details.",
       schema: prepareMintEblInputSchema,
-      handler: (args) => prepareMintEbl(client, args as never, capabilities),
+      handler: (args) => prepareMintEbl(client, args as never, capabilities, rendererBaseUrl),
     },
     complete_mint_ebl: {
-      description: "Finalizes the mint: verifies the signed VC and returns the unsigned mint tx.",
+      description:
+        "Finalizes the mint: verifies the signed VC and returns the unsigned mint tx. Same " +
+        "signingSpec.expectedIssuerDid/mandatoryPointers constraints as complete_credential apply " +
+        "here.",
       schema: completeMintEblInputSchema,
       handler: (args) => completeMintEbl(client, args as never, capabilities),
     },
     mint_ebl: {
-      description: "Intent-driven front door for Pillar 2: prepare-mint -> sign? -> complete-mint.",
+      description:
+        "Intent-driven front door for Pillar 2: prepare_mint_ebl -> sign_credential? -> " +
+        "complete_mint_ebl, calling prepare_mint_ebl internally (so its renderMethod-defaulting " +
+        "behavior applies here too -- see prepare_mint_ebl). Omitting keyPair returns the " +
+        "unsigned VC plus a note to sign externally, then call complete_mint_ebl with the same " +
+        "preparationId.",
       schema: mintEblInputSchema,
-      handler: (args) => mintEbl(client, args as never, capabilities),
+      handler: (args) => mintEbl(client, args as never, capabilities, rendererBaseUrl),
     },
     transfer_holder: {
       description: "Transfers the holder of an eBL.",
@@ -303,7 +381,8 @@ export function buildServer(profile: Profile, allowWrites: boolean): McpServer {
       ? createElicitingSecretProvider(server.server, profile.callerId as string)
       : undefined;
   const client = createCoreEngineClient(profile, { getSecret, authenticated: hasCredentials });
-  const descriptors = buildToolDescriptors(client, profile.capabilities, allowWrites, hasCredentials);
+  const rendererBaseUrl = resolveRendererUrl(profile.baseUrl);
+  const descriptors = buildToolDescriptors(client, profile.capabilities, allowWrites, hasCredentials, rendererBaseUrl);
 
   for (const [name, { description, schema, handler }] of Object.entries(descriptors)) {
     server.registerTool(name, { description, inputSchema: schema }, async (args: unknown) => {
