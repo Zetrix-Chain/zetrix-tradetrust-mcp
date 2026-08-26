@@ -1,11 +1,17 @@
 {
   "name": "zetrix-tradetrust-mcp",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "MCP server exposing TradeTrust operations on the Zetrix L2 as MCP tools (thin client over core-engine's REST API).",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "zetrix-tradetrust-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=18"
   },

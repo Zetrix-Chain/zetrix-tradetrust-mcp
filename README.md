@@ -54,9 +54,18 @@ Or point `Z2TT_PROFILE` at a JSON file instead:
 `documentType` (e.g. `"certificateOfOrigin"`, `"billOfLading"`, `"commercialInvoice"`) that
 auto-fills the JSON-LD `@context` a document type needs for `core-engine`'s signing to succeed —
 call `list_document_types` first (no auth needed) to see every known type, its expected
-`credentialSubject.type`, and whether its shape is proven against `core-engine` or
-allowlisted-but-unconfirmed. Supplying `context` directly still works exactly as before;
-`documentType` is purely additive.
+`credentialSubject.type`, whether its shape is proven against `core-engine`, and (if known) the
+`templateName` it implies for rendering. Supplying `context` directly still works exactly as
+before; `documentType` is purely additive. `prepare_credential`'s `context[0]` defaults to
+`https://www.w3.org/ns/credentials/v2` when omitted, matching `core-engine`'s own default; the
+older v1.1 base context is rejected outright since `core-engine` can no longer sign against it.
+
+Passing `renderMethod` (even `{}`) opts a document into rendering: `id` defaults to this
+deployment's renderer URL, `type` defaults to `EMBEDDED_RENDERER`, and `templateName` defaults to
+whatever `documentType` implies — supply any field yourself to override just that one. If
+`documentType` is omitted (or has no known `templateName` mapping), `templateName` must be
+supplied explicitly; there's no content-agnostic default in `core-engine`'s real template
+allowlist.
 
 ## Run
 

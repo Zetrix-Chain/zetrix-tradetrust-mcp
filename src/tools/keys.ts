@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Wallet } from "ethers";
-import { ServiceDisabledError } from "../errors.js";
+import { IssuerDidValidationError, KeyIdValidationError, ServiceDisabledError } from "../errors.js";
 import type { Capability } from "../config/capabilities.js";
 import { generateP256Multikey } from "../crypto/multikey.js";
 
@@ -55,6 +55,15 @@ export async function createIssuerKey(
         "allowIssuerSigning"
       );
     }
+    if (parsed.issuerDid !== undefined && /^did:key:/i.test(parsed.issuerDid)) {
+      throw new IssuerDidValidationError(
+        "issuerDid must not be a did:key -- did:key identities are self-derived from their own " +
+          "public key, so a freshly generated key pair can never resolve under someone else's " +
+          "did:key. Omit issuerDid to get a correctly self-resolving did:key identity, or reuse " +
+          "the keyPair object a prior create_issuer_key call already returned instead of " +
+          "generating a new one."
+      );
+    }
     const { publicKeyMultibase, secretKeyMultibase } = generateP256Multikey();
     // No issuerDid supplied -- derive a self-resolving did:key from this key's own public key
     // rather than requiring the caller to invent one. did:key needs no hosting/resolution and is
@@ -64,6 +73,13 @@ export async function createIssuerKey(
     // "#key-1" convention used for a caller-supplied issuerDid.
     const controller = parsed.issuerDid ?? `did:key:${publicKeyMultibase}`;
     const defaultFragment = parsed.issuerDid ? "key-1" : publicKeyMultibase;
+    if (parsed.keyId !== undefined && !parsed.keyId.startsWith(`${controller}#`)) {
+      throw new KeyIdValidationError(
+        `keyId must be a verification method on ${controller} -- got "${parsed.keyId}", which names ` +
+          "a different DID than the key pair being generated. Omit keyId to use the default " +
+          `(${controller}#${defaultFragment}), or supply a fragment on this same controller.`
+      );
+    }
     return {
       "@context": "https://w3id.org/security/multikey/v1",
       id: parsed.keyId ?? `${controller}#${defaultFragment}`,

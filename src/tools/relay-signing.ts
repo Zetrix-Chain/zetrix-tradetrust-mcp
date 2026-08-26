@@ -3,8 +3,8 @@ import { Wallet } from "ethers";
 
 const addressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "must be a 0x + 20 bytes EVM address");
 
-/** The EIP-712 ForwardRequest schema the real ERC2771Forwarder expects, matched exactly against
- * what core-engine signs. Hardcoded, not caller-supplied: accepting an arbitrary types/primaryType
+/** Matches core-engine's own FORWARD_REQUEST_TYPES exactly -- the EIP-712 schema the real
+ * ERC2771Forwarder expects. Hardcoded, not caller-supplied: accepting an arbitrary types/primaryType
  * here would let a caller who already has the private key (it's a per-call argument, not
  * server-held) get a valid signature over ANY typed data, not just a ForwardRequest -- e.g. a
  * Permit or an approve, steered by a later prompt injection. */

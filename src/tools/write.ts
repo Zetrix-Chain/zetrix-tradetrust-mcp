@@ -1,7 +1,17 @@
 import { z } from "zod";
 import type { CoreEngineClient } from "../client/types.js";
 import { assertCapabilityEnabled, type Capability } from "../config/capabilities.js";
-import { DOCUMENT_TYPE_KEYS, mergeDocumentTypeContext, type DocumentTypeKey } from "../config/document-types.js";
+import {
+  checkBaseContext,
+  DOCUMENT_TYPE_KEYS,
+  mergeDocumentTypeContext,
+  resolveTemplateName,
+  RENDER_TEMPLATE_NAMES,
+  VC_V2_CONTEXT,
+  type DocumentTypeKey,
+  type RenderTemplateName,
+} from "../config/document-types.js";
+import { ContextValidationError, RenderMethodValidationError } from "../errors.js";
 
 export type ToolCapabilities = Partial<Record<Capability, boolean>>;
 
@@ -90,8 +100,51 @@ export const transferOwnersInputSchema = z.object({
 });
 export type TransferOwnersInput = z.infer<typeof transferOwnersInputSchema>;
 
-const renderMethodSchema = z.object({ id: z.string(), type: z.string(), templateName: z.string() });
-const qrCodeSchema = z.object({ uri: z.string(), type: z.string() });
+export const renderMethodSchema = z.object({
+  id: z.string().min(1).optional(),
+  type: z.string().min(1).optional(),
+  templateName: z.enum(RENDER_TEMPLATE_NAMES).optional(),
+});
+export const qrCodeSchema = z.object({ uri: z.string(), type: z.string() });
+
+/**
+ * undefined in -> undefined out: no renderMethod supplied means no rendering wanted, exactly
+ * today's behavior. Any other value (including {}) means "I want rendering" -- fill in whatever
+ * wasn't supplied. type always defaults to the one real value; id defaults to rendererBaseUrl, or
+ * throws if neither the caller nor this deployment's resolved network supplies one; templateName
+ * defaults via resolveTemplateName(documentType), or throws if that resolves to undefined too --
+ * there is no content-agnostic default in core-engine's real allowlist, so neither field has a
+ * third option to guess.
+ */
+function resolveRenderMethod(
+  renderMethod: { id?: string; type?: string; templateName?: RenderTemplateName } | undefined,
+  documentType: DocumentTypeKey | undefined,
+  rendererBaseUrl: string | undefined
+): { id: string; type: string; templateName: RenderTemplateName } | undefined {
+  if (renderMethod === undefined) return undefined;
+  const id = renderMethod.id ?? rendererBaseUrl;
+  if (id === undefined) {
+    throw new RenderMethodValidationError(
+      "renderMethod.id was omitted and this deployment's baseUrl doesn't match a known " +
+        "network (z2-testnet/z2-mainnet), so there's no default renderer URL to fill in -- " +
+        "supply renderMethod.id explicitly for a custom deployment."
+    );
+  }
+  const templateName = renderMethod.templateName ?? resolveTemplateName(documentType);
+  if (templateName === undefined) {
+    throw new RenderMethodValidationError(
+      "renderMethod.templateName was omitted and documentType was omitted (or has no known " +
+        "templateName mapping), so there's no content-agnostic default to fill in -- core-engine " +
+        `has no "generic" template; supply renderMethod.templateName explicitly, one of: ` +
+        `${RENDER_TEMPLATE_NAMES.join(", ")}.`
+    );
+  }
+  return {
+    id,
+    type: renderMethod.type ?? "EMBEDDED_RENDERER",
+    templateName,
+  };
+}
 
 export const prepareCredentialInputSchema = z.object({
   issuerDid: z.string(),
@@ -111,13 +164,36 @@ export type PrepareCredentialInput = z.infer<typeof prepareCredentialInputSchema
 export async function prepareCredential(
   client: CoreEngineClient,
   input: PrepareCredentialInput,
-  capabilities?: ToolCapabilities
+  capabilities?: ToolCapabilities,
+  rendererBaseUrl?: string
 ): Promise<Record<string, unknown> | DryRunResult> {
-  const { dryRun, documentType, context, ...rest } = prepareCredentialInputSchema.parse(input);
+  const { dryRun, documentType, context, renderMethod, ...rest } = prepareCredentialInputSchema.parse(input);
   const mergedContext = mergeDocumentTypeContext(context, documentType);
-  const body = { ...rest, ...(mergedContext ? { context: mergedContext } : {}) };
   const path = "/credentials/prepare";
   assertCapabilityEnabled(path, capabilities);
+
+  const contextIssue = checkBaseContext(mergedContext);
+  if (contextIssue?.kind === "v1-context-unsupported") {
+    throw new ContextValidationError(
+      "the v1.1 base context pairs with issuanceDate, but core-engine currently emits validFrom " +
+        "regardless of context version -- a v1.1 credential built here can never be signed. Use " +
+        "https://www.w3.org/ns/credentials/v2 instead."
+    );
+  }
+  // A missing/unrecognized base context is NOT rejected -- core-engine's own buildCredential
+  // already defaults a missing context to [VC_V2_CONTEXT] itself (src/wrap/wrap.ts), so silently
+  // matching that default here (rather than making the caller supply it) preserves the previously-
+  // working omit-context call shape and lets documentType be used on its own, exactly like
+  // prepare_mint_ebl already does on the eBL side. Only an explicit, confirmed-unsignable v1.1
+  // context above is worth rejecting -- there's nothing "wrong" about an absent one.
+  const finalContext = contextIssue?.kind === "missing-base-context" ? [VC_V2_CONTEXT, ...(mergedContext ?? [])] : mergedContext;
+
+  const resolvedRenderMethod = resolveRenderMethod(renderMethod, documentType, rendererBaseUrl);
+  const body = {
+    ...rest,
+    ...(finalContext ? { context: finalContext } : {}),
+    ...(resolvedRenderMethod ? { renderMethod: resolvedRenderMethod } : {}),
+  };
 
   if (dryRun) {
     return { dryRun: true, wouldSend: { method: "POST", path, body } };
@@ -359,13 +435,20 @@ export type PrepareMintEblInput = z.infer<typeof prepareMintEblInputSchema>;
 export async function prepareMintEbl(
   client: CoreEngineClient,
   input: PrepareMintEblInput,
-  capabilities?: ToolCapabilities
+  capabilities?: ToolCapabilities,
+  rendererBaseUrl?: string
 ): Promise<Record<string, unknown> | DryRunResult> {
-  const { dryRun, documentType, context, ...rest } = prepareMintEblInputSchema.parse(input);
+  const { dryRun, documentType, context, renderMethod, ...rest } = prepareMintEblInputSchema.parse(input);
   const mergedContext = mergeDocumentTypeContext(context, documentType);
-  const body = { ...rest, ...(mergedContext ? { context: mergedContext } : {}) };
   const path = "/ebl/prepare-mint";
   assertCapabilityEnabled(path, capabilities);
+
+  const resolvedRenderMethod = resolveRenderMethod(renderMethod, documentType, rendererBaseUrl);
+  const body = {
+    ...rest,
+    ...(mergedContext ? { context: mergedContext } : {}),
+    ...(resolvedRenderMethod ? { renderMethod: resolvedRenderMethod } : {}),
+  };
 
   if (dryRun) {
     return { dryRun: true, wouldSend: { method: "POST", path, body } };
